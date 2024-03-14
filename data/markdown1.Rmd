@@ -1,0 +1,178 @@
+---
+title: "Drought in the Western US: 2000-2024"
+output:
+  html_document:
+    df_print: paged
+---
+Isaac Bell
+Geog 490
+
+
+For my final project, I'll be investigating a netCDF file showing Palmer Drought Severity Index in the US. This dataset originally had data from 1980 to 2024, but to make things simpler I've decided to only focus on drought in the western states between 2000 and today. Palmer Drought Severity (PDSI) uses data about both temperature and precipitation to quantify how severe a drought is; relative to a region's normal climate, negative values represent dry, and positive values represent wet. The dataset I'm using has values for the mean PDSI every 5 days, gridded at a resolution of 1/24th degree or about 4km.
+
+I wanted to use R to see what patterns there were to this data, and which areas have been most or least affected by drought. To do this, I'm going to be extracting the gridded data and associating it to Western US states and counties.
+
+
+First, loading libraries:
+
+```{r message=FALSE, warning=FALSE}
+library(ncdf4)
+library(CFtime)
+library(lattice)
+library(RColorBrewer)
+library(maps)
+library(sf)
+library(terra)
+library(tidyterra)
+library(classInt)
+library(ggplot2)
+library(raster)
+library(exactextractr)
+library(reshape2)
+```
+
+
+Getting western states shapefiles:
+
+```{r}
+state_sf <- st_as_sf(map("state", plot = FALSE, fill = TRUE, crs = "+proj=longlat +ellps=WGS84"))
+selected_sf <- state_sf[state_sf$ID %in% c("washington","oregon","california","arizona","new mexico","nevada","idaho","utah","colorado","wyoming","montana"),]
+state_geom <- st_geometry(selected_sf)
+plot(selected_sf)
+```
+
+
+Getting county shapefiles:
+
+```{r}
+county_sf <- st_as_sf(map("county", plot = FALSE, fill = TRUE))
+county_sf$state <- sub(",.*", "", county_sf$ID)
+selected_county <- county_sf[county_sf$state %in% c("washington","oregon","california","arizona","new mexico","nevada","idaho","utah","colorado","wyoming","montana"),]
+county_geom <- st_geometry(selected_county)
+plot(selected_county)
+```
+I'll use these shapefiles to extract data spatially from my raster dataset.
+
+Loading and setting up netCDF file:
+
+```{r}
+ncpath <- "/Users/isaacbell/Documents/geog490/final_proj/data/"
+ncname <- "2000to2024"
+ncfname <- paste(ncpath, ncname, ".nc", sep="")
+ncin <- nc_open(ncfname)
+dname <- "daily_mean_palmer_drought_severity_index"
+lon <- ncvar_get(ncin,"lon")
+nlon <- dim(lon)
+lat <- ncvar_get(ncin,"lat")
+nlat <- dim(lat)
+title <- ncatt_get(ncin,0,"title")
+institution <- ncatt_get(ncin,0,"institution")
+datasource <- ncatt_get(ncin,0,"source")
+references <- ncatt_get(ncin,0,"references")
+history <- ncatt_get(ncin,0,"history")
+Conventions <- ncatt_get(ncin,0,"Conventions")
+pdsi_array <- ncvar_get(ncin,dname)
+dlname <- ncatt_get(ncin,dname,"long_name")
+dunits <- ncatt_get(ncin,dname,"units")
+fillvalue <- ncatt_get(ncin,dname,"_FillValue")
+dim(pdsi_array)
+```
+
+
+Getting time from netCDF:
+
+```{r}
+time <- ncvar_get(ncin,"day")
+tunits <- ncatt_get(ncin,"day","units")
+nt <- dim(time)
+cf <- CFtime(tunits$value, calendar = "proleptic_gregorian", time) 
+timestamps <- CFtimestamp(cf)
+months = CFfactor(cf,"month")
+time_cf <- CFparse(cf, timestamps)
+head(time_cf)
+```
+As you can see, the file contains measurements recurring every 5 days.
+
+
+Making a raster from netCDF, and applying time values to it:
+
+```{r}
+pdsi_raster <- rast(ncfname)
+names(pdsi_raster) <- timestamps
+stamps_date <- as.Date(timestamps)
+time(pdsi_raster) <- stamps_date
+```
+This allows me to parse the raster stack by date.
+
+
+Getting the overall mean PDSI values for the whole 2000-2024 raster stack:
+
+```{r}
+mean_raster = mean(pdsi_raster)
+plot(mean_raster)
+```
+
+## Geographic analysis
+
+Now that I have the county and state geometries, I can use the `exact_extract()` function to pull the data from the raster into the vector. This comes from the `exactextratr` library, and it allows me to write the average value within each polygon to a new column on the vector data.
+
+```{r echo=FALSE,results='hide',fig.keep='all'}
+selected_sf$mean_alltime <- exact_extract(mean_raster, selected_sf, 'mean')
+plot(selected_sf[,'mean_alltime'])
+```
+
+```{r echo=FALSE,results='hide',fig.keep='all'}
+selected_county$mean_alltime <- exact_extract(mean_raster, selected_county, 'mean')
+plot(selected_county[,'mean_alltime'])
+```
+(note that the scales are different for both plots)
+
+In the state plots, you can see that every state in the west has seen stronger dry conditions than wet conditions since 2000. Montana looks to be the least affected, and Oregon has had the driest average conditions (relative to normal).
+
+
+Next, I'll split up the raster stack into individual years, then use `exact_extract()` to get the means for each year into the state and county shapefiles.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+year_li <- seq(2000,2024)
+for (i in year_li){
+i <- toString(i)
+a <- pdsi_raster[i]
+selected_sf[, i] <- exact_extract(a, selected_sf, 'mean')
+selected_county[, i] <- exact_extract(a, selected_county, 'mean')
+}
+```
+(This might not be the most efficient method, but it works well enough)
+
+
+Here's a quick time series plot of the average PDSI for each state:
+
+```{r echo=FALSE,results='hide',fig.keep='all'}
+states_df <- st_drop_geometry(selected_sf)
+drops <- c("ID","mean_alltime")
+select_states_df <- states_df[ , !(names(states_df) %in% drops)]
+select_states_df$metadata <- row.names(select_states_df)
+select_states_df <- melt(select_states_df, "metadata")
+ggplot(select_states_df, aes(variable, value, group = metadata, color = metadata)) + 
+geom_line()
+```
+
+
+Let's plot the average PDSI rasters for a couple of years:
+
+```{r}
+raster_2000 <- mean(pdsi_raster["2000"])
+plot(raster_2000,
+     breaks=c(-4,-3,-2,-1,0,1,2,3,4),
+     col=brewer.pal(9, "RdYlGn"),
+     main="Mean PDSI: 2000"
+     )
+```
+```{r}
+raster_2023 <- mean(pdsi_raster["2023"])
+plot(raster_2023,
+     breaks=c(-5,-4,-3,-2,-1,0,1,2,3,4,5),
+     col=brewer.pal(11, "RdYlGn"),
+     main="Mean PDSI: 2023"
+     )
+```
+For reference, the National Drought Mitigation Center considers PDSI values from -3 to -4 'severe drought,' and values above -4 as 'extreme drought.'
